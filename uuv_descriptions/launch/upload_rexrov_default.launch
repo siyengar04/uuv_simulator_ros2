@@ -1,51 +1,74 @@
-<launch>
-  <arg name="debug" default="0"/>
+import os
+from launch import LaunchDescription
+from launch_ros.actions import Node
+from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
+from launch.substitutions import LaunchConfiguration
+from launch.launch_description_sources import PythonLaunchDescriptionSource
+from ament_index_python.packages import get_package_share_directory
 
-  <arg name="x" default="0"/>
-  <arg name="y" default="0"/>
-  <arg name="z" default="-20"/>
-  <arg name="roll" default="0.0"/>
-  <arg name="pitch" default="0.0"/>
-  <arg name="yaw" default="0.0"/>
+def generate_launch_description():
+    return LaunchDescription([
+        DeclareLaunchArgument('debug', default_value='0', description='Enable debugging'),
+        DeclareLaunchArgument('x', default_value='0', description='X position'),
+        DeclareLaunchArgument('y', default_value='0', description='Y position'),
+        DeclareLaunchArgument('z', default_value='-20', description='Z position'),
+        DeclareLaunchArgument('roll', default_value='0.0', description='Roll angle'),
+        DeclareLaunchArgument('pitch', default_value='0.0', description='Pitch angle'),
+        DeclareLaunchArgument('yaw', default_value='0.0', description='Yaw angle'),
+        DeclareLaunchArgument('mode', default_value='default', description='Robot mode'),
+        DeclareLaunchArgument('namespace', default_value='rexrov', description='Namespace for the robot'),
+        DeclareLaunchArgument('use_ned_frame', default_value='false', description='Use NED frame'),
 
-  <arg name="mode" default="default"/>
-  <arg name="namespace" default="rexrov"/>
-  <arg name="use_ned_frame" default="false"/>
+        Node(
+            package='xacro',
+            executable='xacro',
+            name='robot_description',
+            parameters=[{
+                'robot_description': LaunchConfiguration('robot_description')
+            }],
+            arguments=[
+                os.path.join(get_package_share_directory('uuv_descriptions'),
+                             'robots', f'rexrov_{LaunchConfiguration("mode")}.xacro'),
+                '--inorder',
+                f'debug:={LaunchConfiguration("debug")}',
+                f'namespace:={LaunchConfiguration("namespace")}',
+                f'inertial_reference_frame:={'world_ned' if LaunchConfiguration("use_ned_frame") == 'true' else 'world'}'
+            ]
+        ),
 
-  <group ns="$(arg namespace)">
-    <group if="$(arg use_ned_frame)">
-      <param name="robot_description"
-        command="$(find xacro)/xacro '$(find uuv_descriptions)/robots/rexrov_$(arg mode).xacro' --inorder
-          debug:=$(arg debug)
-          namespace:=$(arg namespace)
-          inertial_reference_frame:=world_ned" />
-    </group>
+        Node(
+            package='uuv_descriptions',
+            executable='spawn_model',
+            name='urdf_spawner',
+            output='screen',
+            arguments=[
+                '-urdf', '-x', LaunchConfiguration('x'), '-y', LaunchConfiguration('y'),
+                '-z', LaunchConfiguration('z'), '-R', LaunchConfiguration('roll'),
+                '-P', LaunchConfiguration('pitch'), '-Y', LaunchConfiguration('yaw'),
+                '-model', LaunchConfiguration('namespace'),
+                '-param', [LaunchConfiguration("namespace"), "/robot_description"]
+            ]
+        ),
 
-    <group unless="$(arg use_ned_frame)">
-      <param name="robot_description"
-        command="$(find xacro)/xacro '$(find uuv_descriptions)/robots/rexrov_$(arg mode).xacro' --inorder
-          debug:=$(arg debug)
-          namespace:=$(arg namespace)
-          inertial_reference_frame:=world" />
-    </group>
+        Node(
+            package='robot_state_publisher',
+            executable='robot_state_publisher',
+            name='robot_state_publisher',
+            output='screen',
+            parameters=[{
+                'robot_description': [LaunchConfiguration("namespace"), "/robot_description"],
+                'publish_frequency': 5.0
+            }]
+        ),
 
-    <!-- Run a python script to the send a service call to gazebo_ros to spawn a URDF robot -->
-    <node name="urdf_spawner" pkg="uuv_descriptions" type="spawn_model" respawn="false" output="screen"
-          args="-urdf -x $(arg x) -y $(arg y) -z $(arg z) -R $(arg roll) -P $(arg pitch) -Y $(arg yaw) -model $(arg namespace) -param /$(arg namespace)/robot_description"/>
-
-    <!-- A joint state publisher plugin already is started with the model, no need to use the default joint state publisher -->
-
-    <!-- Publish robot model for ROS -->
-    <node name="robot_state_publisher" pkg="robot_state_publisher" type="robot_state_publisher" respawn="true" output="screen">
-      <param name="robot_description" value="/$(arg namespace)/robot_description" />
-      <param name="publish_frequency" value="5" />
-    </node>
-  </group>
-
-  <include file="$(find uuv_assistants)/launch/message_to_tf.launch">
-    <arg name="namespace" value="$(arg namespace)"/>
-    <arg name="world_frame" value="world"/>
-    <arg name="child_frame_id" value="/$(arg namespace)/base_link"/>
-  </include>
-
-</launch>
+        IncludeLaunchDescription(
+            PythonLaunchDescriptionSource(
+                os.path.join(get_package_share_directory('uuv_assistants'), 'launch', 'message_to_tf.launch.py')
+            ),
+            launch_arguments={
+                'namespace': LaunchConfiguration('namespace'),
+                'world_frame': 'world',
+                'child_frame_id': [LaunchConfiguration("namespace"), "/base_link"]
+            }.items()
+        )
+    ])
