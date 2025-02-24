@@ -1,51 +1,30 @@
-cmake_minimum_required(VERSION 2.8.3)
+cmake_minimum_required(VERSION 3.5)
 project(uuv_assistants)
 
-find_package(catkin REQUIRED COMPONENTS
-  roscpp
-  nav_msgs
-  geometry_msgs
-  sensor_msgs
-  tf
-  topic_tools)
+# Find ament macros and libraries
+find_package(ament_cmake REQUIRED)
+find_package(ament_lint_auto REQUIRED)  # Now called before ament_package()
+find_package(rclcpp REQUIRED)
 
-catkin_python_setup()
+# Optional: if BUILD_TESTING, find additional dependencies
+if(BUILD_TESTING)
+  find_package(ament_cmake_gtest REQUIRED)
+#  find_package(ros_testing REQUIRED)
+  find_package(xacro REQUIRED)
+endif()
+add_executable(message_to_tf src/message_to_tf.cc)
 
-catkin_package(
-  CATKIN_DEPENDS
-    roscpp
-    nav_msgs
-    geometry_msgs
-    sensor_msgs
-    tf
-    topic_tools
-)
+install(TARGETS
+        message_to_tf
+        DESTINATION lib/${PROJECT_NAME})
+# Install python scripts
+install(PROGRAMS scripts/set_simulation_timer.py
+        DESTINATION lib/${PROJECT_NAME})
 
-include_directories(${catkin_INCLUDE_DIRS})
-
-add_executable(uuv_message_to_tf
-  src/message_to_tf.cc
-)
-
-target_link_libraries(uuv_message_to_tf
-  ${catkin_LIBRARIES}
-)
-
-catkin_install_python(PROGRAMS scripts/publish_footprints.py
-                               scripts/set_simulation_timer.py
-                               scripts/publish_world_models.py
-                               scripts/publish_vehicle_footprint.py
-                               scripts/unpause_simulation.py
-                               scripts/create_new_robot_model
-                               scripts/create_thruster_manager_configuration
-                      DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION})
-
-install(DIRECTORY launch
-        DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}
+install(DIRECTORY launch src
+        DESTINATION share/${PROJECT_NAME}
         PATTERN "*~" EXCLUDE)
 
-install(TARGETS uuv_message_to_tf
-  ARCHIVE DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
-  LIBRARY DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
-  RUNTIME DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
-)
+
+# Call ament_package() only once at the end
+ament_package()

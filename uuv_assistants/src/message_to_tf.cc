@@ -1,321 +1,288 @@
-// Copyright (c) 2016 The UUV Simulator Authors.
-// All rights reserved.
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-//
-// This source code is derived from hector_localization
-//   (https://github.com/tu-darmstadt-ros-pkg/hector_localization)
-// Copyright (c) 2012, Johannes Meyer, TU Darmstadt,
-// licensed under the BSD 3-Clause license,
-// cf. 3rd-party-licenses.txt file in the root directory of this source tree.
-//
-// The original code was modified to:
-// - be more consistent with other sensor plugins within uuv_simulator,
-// - adhere to Gazebo's coding standards.
+#include <rclcpp/rclcpp.hpp>
+#include <nav_msgs/msg/odometry.hpp>
+#include <geometry_msgs/msg/pose_stamped.hpp>
+#include <geometry_msgs/msg/vector3_stamped.hpp>
+#include <geometry_msgs/msg/transform_stamped.hpp>
+#include <sensor_msgs/msg/imu.hpp>
+#include <tf2_ros/transform_broadcaster.h>
+#include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
+#include <tf2/LinearMath/Quaternion.h>
+#include <tf2/LinearMath/Matrix3x3.h>
+#include <tf2/LinearMath/Transform.h>
+#include <tf2/utils.h>
 
-#include <ros/ros.h>
-#include <nav_msgs/Odometry.h>
-#include <geometry_msgs/PoseStamped.h>
-#include <geometry_msgs/Vector3Stamped.h>
-#include <geometry_msgs/TransformStamped.h>
-#include <sensor_msgs/Imu.h>
-#include <tf/transform_broadcaster.h>
-#include <tf/transform_listener.h> // for tf::getPrefixParam()
-#include <tf/transform_datatypes.h>
+#include <memory>
+#include <string>
+#include <vector>
 
-#include <topic_tools/shape_shifter.h>
+using namespace std::chrono_literals;
 
-std::string g_odometry_topic;
-std::string g_pose_topic;
-std::string g_imu_topic;
-std::string g_topic;
-std::string g_frame_id;
-std::string g_footprint_frame_id;
-std::string g_position_frame_id;
-std::string g_stabilized_frame_id;
-std::string g_child_frame_id;
-
-bool g_publish_roll_pitch;
-
-std::string g_tf_prefix;
-
-tf::TransformBroadcaster *g_transform_broadcaster;
-ros::Publisher g_pose_publisher;
-ros::Publisher g_euler_publisher;
-
-#ifndef TF_MATRIX3x3_H
-  typedef btScalar tfScalar;
-  namespace tf { typedef btMatrix3x3 Matrix3x3; }
-#endif
-
-void addTransform(std::vector<geometry_msgs::TransformStamped>& transforms, const tf::StampedTransform& tf)
+class MessageToTfNode : public rclcpp::Node
 {
-  transforms.push_back(geometry_msgs::TransformStamped());
-  tf::transformStampedTFToMsg(tf, transforms.back());
-}
+public:
+  MessageToTfNode()
+      : Node("message_to_tf")
+  {
+    // Declare parameters
+    this->declare_parameter<std::string>("odometry_topic", "");
+    this->declare_parameter<std::string>("pose_topic", "");
+    this->declare_parameter<std::string>("imu_topic", "");
+    this->declare_parameter<std::string>("topic", "");
+    this->declare_parameter<std::string>("frame_id", "");
+    this->declare_parameter<std::string>("footprint_frame_id", "base_footprint");
+    this->declare_parameter<std::string>("position_frame_id", "");
+    this->declare_parameter<std::string>("stabilized_frame_id", "base_stabilized");
+    this->declare_parameter<std::string>("child_frame_id", "");
+    this->declare_parameter<bool>("publish_roll_pitch", true);
+    this->declare_parameter<bool>("publish_pose", true);
+    this->declare_parameter<bool>("publish_euler", true);
 
-void sendTransform(geometry_msgs::Pose const &pose, const std_msgs::Header& header, std::string child_frame_id = "")
+    // Get parameters
+    odometry_topic_ = this->get_parameter("odometry_topic").as_string();
+    pose_topic_ = this->get_parameter("pose_topic").as_string();
+    imu_topic_ = this->get_parameter("imu_topic").as_string();
+    topic_ = this->get_parameter("topic").as_string();
+    frame_id_ = this->get_parameter("frame_id").as_string();
+    footprint_frame_id_ = this->get_parameter("footprint_frame_id").as_string();
+    position_frame_id_ = this->get_parameter("position_frame_id").as_string();
+    stabilized_frame_id_ = this->get_parameter("stabilized_frame_id").as_string();
+    child_frame_id_ = this->get_parameter("child_frame_id").as_string();
+    publish_roll_pitch_ = this->get_parameter("publish_roll_pitch").as_bool();
+
+    // Initialize TF broadcaster
+    tf_broadcaster_ = std::make_shared<tf2_ros::TransformBroadcaster>(this);
+
+    // Create subscribers based on parameters
+    if (!odometry_topic_.empty())
+    {
+      odom_sub_ = this->create_subscription<nav_msgs::msg::Odometry>(
+          odometry_topic_, 10, std::bind(&MessageToTfNode::odomCallback, this, std::placeholders::_1));
+    }
+    if (!pose_topic_.empty())
+    {
+      pose_sub_ = this->create_subscription<geometry_msgs::msg::PoseStamped>(
+          pose_topic_, 10, std::bind(&MessageToTfNode::poseCallback, this, std::placeholders::_1));
+    }
+    if (!imu_topic_.empty())
+    {
+      imu_sub_ = this->create_subscription<sensor_msgs::msg::Imu>(
+          imu_topic_, 10, std::bind(&MessageToTfNode::imuCallback, this, std::placeholders::_1));
+    }
+    if (!topic_.empty())
+    {
+      multi_sub_ = this->create_subscription<topic_tools::msg::ShapeShifter>(
+          topic_, 10, std::bind(&MessageToTfNode::multiCallback, this, std::placeholders::_1));
+    }
+
+    // Create publishers
+    if (this->get_parameter("publish_pose").as_bool())
+    {
+      pose_pub_ = this->create_publisher<geometry_msgs::msg::PoseStamped>("pose", 10);
+    }
+    if (this->get_parameter("publish_euler").as_bool())
+    {
+      euler_pub_ = this->create_publisher<geometry_msgs::msg::Vector3Stamped>("euler", 10);
+    }
+  }
+
+private:
+  void odomCallback(const nav_msgs::msg::Odometry::SharedPtr msg)
+  {
+    sendTransform(msg->pose.pose, msg->header, msg->child_frame_id);
+  }
+
+  void poseCallback(const geometry_msgs::msg::PoseStamped::SharedPtr msg)
+  {
+    sendTransform(msg->pose, msg->header);
+  }
+
+  void imuCallback(const sensor_msgs::msg::Imu::SharedPtr msg)
+  {
+    std::vector<geometry_msgs::msg::TransformStamped> transforms;
+
+    tf2::Quaternion orientation;
+    tf2::fromMsg(msg->orientation, orientation);
+    double roll, pitch, yaw;
+    tf2::Matrix3x3(orientation).getRPY(roll, pitch, yaw);
+    tf2::Quaternion rollpitch = tf2::Quaternion();
+    rollpitch.setRPY(roll, pitch, 0.0);
+
+    // base_link transform (roll, pitch)
+    if (publish_roll_pitch_)
+    {
+      geometry_msgs::msg::TransformStamped tf;
+      tf.header.stamp = msg->header.stamp;
+      tf.header.frame_id = stabilized_frame_id_;
+      tf.child_frame_id = child_frame_id_.empty() ? "base_link" : child_frame_id_;
+      tf.transform.translation.x = 0.0;
+      tf.transform.translation.y = 0.0;
+      tf.transform.translation.z = 0.0;
+      tf.transform.rotation = tf2::toMsg(rollpitch);
+      transforms.push_back(tf);
+    }
+
+    if (!transforms.empty())
+    {
+      tf_broadcaster_->sendTransform(transforms);
+    }
+
+    // Publish pose message
+    if (pose_pub_)
+    {
+      geometry_msgs::msg::PoseStamped pose_stamped;
+      pose_stamped.header.stamp = msg->header.stamp;
+      pose_stamped.header.frame_id = stabilized_frame_id_;
+      pose_stamped.pose.orientation = tf2::toMsg(rollpitch);
+      pose_pub_->publish(pose_stamped);
+    }
+  }
+
+  void multiCallback(const topic_tools::msg::ShapeShifter::SharedPtr msg)
+  {
+    if (msg->get_type() == "nav_msgs/msg/Odometry")
+    {
+      auto odom = msg->instantiate<nav_msgs::msg::Odometry>();
+      odomCallback(odom);
+    }
+    else if (msg->get_type() == "geometry_msgs/msg/PoseStamped")
+    {
+      auto pose = msg->instantiate<geometry_msgs::msg::PoseStamped>();
+      poseCallback(pose);
+    }
+    else if (msg->get_type() == "sensor_msgs/msg/Imu")
+    {
+      auto imu = msg->instantiate<sensor_msgs::msg::Imu>();
+      imuCallback(imu);
+    }
+    else
+    {
+      RCLCPP_ERROR_THROTTLE(
+          this->get_logger(), *this->get_clock(), 1000,
+          "message_to_tf received a %s message. Supported message types: nav_msgs/Odometry geometry_msgs/PoseStamped sensor_msgs/Imu",
+          msg->get_type().c_str());
+    }
+  }
+
+  void sendTransform(const geometry_msgs::msg::Pose &pose, const std_msgs::msg::Header &header, const std::string &child_frame_id = "")
+  {
+    std::vector<geometry_msgs::msg::TransformStamped> transforms;
+
+    geometry_msgs::msg::TransformStamped tf;
+    tf.header.stamp = header.stamp;
+    tf.header.frame_id = frame_id_.empty() ? header.frame_id : frame_id_;
+    tf.child_frame_id = child_frame_id_.empty() ? child_frame_id : child_frame_id_;
+
+    tf2::Quaternion orientation;
+    tf2::fromMsg(pose.orientation, orientation);
+    double yaw, pitch, roll;
+    tf2::Matrix3x3(orientation).getRPY(roll, pitch, yaw);
+    tf2::Vector3 position(pose.position.x, pose.position.y, pose.position.z);
+
+    // Position intermediate transform (x, y, z)
+    if (!position_frame_id_.empty() && child_frame_id != position_frame_id_)
+    {
+      tf.child_frame_id = position_frame_id_;
+      tf.transform.translation.x = position.x();
+      tf.transform.translation.y = position.y();
+      tf.transform.translation.z = position.z();
+      tf.transform.rotation = tf2::toMsg(tf2::Quaternion(0.0, 0.0, 0.0, 1.0));
+      transforms.push_back(tf);
+    }
+
+    // Footprint intermediate transform (x, y, yaw)
+    if (!footprint_frame_id_.empty() && child_frame_id != footprint_frame_id_)
+    {
+      tf.child_frame_id = footprint_frame_id_;
+      tf.transform.translation.x = position.x();
+      tf.transform.translation.y = position.y();
+      tf.transform.translation.z = 0.0;
+      tf.transform.rotation = tf2::toMsg(tf2::Quaternion(0.0, 0.0, yaw));
+      transforms.push_back(tf);
+
+      yaw = 0.0;
+      position.setX(0.0);
+      position.setY(0.0);
+      tf.header.frame_id = footprint_frame_id_;
+    }
+
+    // Stabilized intermediate transform (z)
+    if (!stabilized_frame_id_.empty() && child_frame_id != stabilized_frame_id_)
+    {
+      tf.child_frame_id = stabilized_frame_id_;
+      tf.transform.translation.x = 0.0;
+      tf.transform.translation.y = 0.0;
+      tf.transform.translation.z = position.z();
+      tf.transform.rotation = tf2::toMsg(tf2::Quaternion(0.0, 0.0, 0.0, 1.0));
+      transforms.push_back(tf);
+
+      position.setZ(0.0);
+      tf.header.frame_id = stabilized_frame_id_;
+    }
+
+    // Base_link transform (roll, pitch)
+    if (publish_roll_pitch_)
+    {
+      tf.child_frame_id = child_frame_id_.empty() ? "base_link" : child_frame_id_;
+      tf.transform.translation.x = position.x();
+      tf.transform.translation.y = position.y();
+      tf.transform.translation.z = position.z();
+      tf.transform.rotation = tf2::toMsg(tf2::Quaternion(roll, pitch, yaw));
+      transforms.push_back(tf);
+    }
+
+    tf_broadcaster_->sendTransform(transforms);
+
+    // Publish pose message
+    if (pose_pub_)
+    {
+      geometry_msgs::msg::PoseStamped pose_stamped;
+      pose_stamped.pose = pose;
+      pose_stamped.header = header;
+      pose_pub_->publish(pose_stamped);
+    }
+
+    // Publish Euler angles
+    if (euler_pub_)
+    {
+      geometry_msgs::msg::Vector3Stamped euler_stamped;
+      euler_stamped.vector.x = roll;
+      euler_stamped.vector.y = pitch;
+      euler_stamped.vector.z = yaw;
+      euler_stamped.header = header;
+      euler_pub_->publish(euler_stamped);
+    }
+  }
+
+  // Parameters
+  std::string odometry_topic_;
+  std::string pose_topic_;
+  std::string imu_topic_;
+  std::string topic_;
+  std::string frame_id_;
+  std::string footprint_frame_id_;
+  std::string position_frame_id_;
+  std::string stabilized_frame_id_;
+  std::string child_frame_id_;
+  bool publish_roll_pitch_;
+
+  // Subscribers
+  rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub_;
+  rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr pose_sub_;
+  rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr imu_sub_;
+  rclcpp::Subscription<topic_tools::msg::ShapeShifter>::SharedPtr multi_sub_;
+
+  // Publishers
+  rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr pose_pub_;
+  rclcpp::Publisher<geometry_msgs::msg::Vector3Stamped>::SharedPtr euler_pub_;
+
+  // TF Broadcaster
+  std::shared_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
+};
+
+int main(int argc, char **argv)
 {
-  std::vector<geometry_msgs::TransformStamped> transforms;
-
-  tf::StampedTransform tf;
-  tf.stamp_ = header.stamp;
-
-  tf.frame_id_ = header.frame_id;
-  if (!g_frame_id.empty()) tf.frame_id_ = g_frame_id;
-  tf.frame_id_ = tf::resolve(g_tf_prefix, tf.frame_id_);
-
-  if (!g_child_frame_id.empty()) child_frame_id = g_child_frame_id;
-  if (child_frame_id.empty()) child_frame_id = "base_link";
-
-  tf::Quaternion orientation;
-  tf::quaternionMsgToTF(pose.orientation, orientation);
-  tfScalar yaw, pitch, roll;
-  tf::Matrix3x3(orientation).getEulerYPR(yaw, pitch, roll);
-  tf::Point position;
-  tf::pointMsgToTF(pose.position, position);
-
-  // position intermediate transform (x,y,z)
-  if( !g_position_frame_id.empty() && child_frame_id != g_position_frame_id) {
-    tf.child_frame_id_ = tf::resolve(g_tf_prefix, g_position_frame_id);
-    tf.setOrigin(tf::Vector3(position.x(), position.y(), position.z() ));
-    tf.setRotation(tf::Quaternion(0.0, 0.0, 0.0, 1.0));
-    addTransform(transforms, tf);
-  }
-
-  // footprint intermediate transform (x,y,yaw)
-  if (!g_footprint_frame_id.empty() && child_frame_id != g_footprint_frame_id) {
-    tf.child_frame_id_ = tf::resolve(g_tf_prefix, g_footprint_frame_id);
-    tf.setOrigin(tf::Vector3(position.x(), position.y(), 0.0));
-    tf.setRotation(tf::createQuaternionFromRPY(0.0, 0.0, yaw));
-    addTransform(transforms, tf);
-
-    yaw = 0.0;
-    position.setX(0.0);
-    position.setY(0.0);
-    tf.frame_id_ = tf::resolve(g_tf_prefix, g_footprint_frame_id);
-  }
-
-  // stabilized intermediate transform (z)
-  if (!g_footprint_frame_id.empty() && child_frame_id != g_stabilized_frame_id) {
-    tf.child_frame_id_ = tf::resolve(g_tf_prefix, g_stabilized_frame_id);
-    tf.setOrigin(tf::Vector3(0.0, 0.0, position.z()));
-    tf.setBasis(tf::Matrix3x3::getIdentity());
-    addTransform(transforms, tf);
-
-    position.setZ(0.0);
-    tf.frame_id_ = tf::resolve(g_tf_prefix, g_stabilized_frame_id);
-  }
-
-  // base_link transform (roll, pitch)
-  if (g_publish_roll_pitch) {
-    tf.child_frame_id_ = tf::resolve(g_tf_prefix, child_frame_id);
-    tf.setOrigin(position);
-    tf.setRotation(tf::createQuaternionFromRPY(roll, pitch, yaw));
-    addTransform(transforms, tf);
-  }
-
-  g_transform_broadcaster->sendTransform(transforms);
-
-  // publish pose message
-  if (g_pose_publisher) {
-    geometry_msgs::PoseStamped pose_stamped;
-    pose_stamped.pose = pose;
-    pose_stamped.header = header;
-    g_pose_publisher.publish(pose_stamped);
-  }
-
-  // publish pose message
-  if (g_euler_publisher) {
-    geometry_msgs::Vector3Stamped euler_stamped;
-    euler_stamped.vector.x = roll;
-    euler_stamped.vector.y = pitch;
-    euler_stamped.vector.z = yaw;
-    euler_stamped.header = header;
-    g_euler_publisher.publish(euler_stamped);
-  }
-}
-
-void odomCallback(nav_msgs::Odometry const &odometry) {
-  sendTransform(odometry.pose.pose, odometry.header, odometry.child_frame_id);
-}
-
-void poseCallback(geometry_msgs::PoseStamped const &pose) {
-  sendTransform(pose.pose, pose.header);
-}
-
-void tfCallback(geometry_msgs::TransformStamped const &tf) {
-  geometry_msgs::Pose pose;
-  pose.position.x = tf.transform.translation.x;
-  pose.position.y = tf.transform.translation.y;
-  pose.position.z = tf.transform.translation.z;
-  pose.orientation = tf.transform.rotation;
-
-  sendTransform(pose, tf.header);
-}
-
-void imuCallback(sensor_msgs::Imu const &imu) {
-  std::vector<geometry_msgs::TransformStamped> transforms;
-  std::string child_frame_id;
-
-  tf::StampedTransform tf;
-  tf.stamp_ = imu.header.stamp;
-
-  tf.frame_id_ = tf::resolve(g_tf_prefix, g_stabilized_frame_id);
-  if (!g_child_frame_id.empty()) child_frame_id = g_child_frame_id;
-  if (child_frame_id.empty()) child_frame_id = "base_link";
-
-  tf::Quaternion orientation;
-  tf::quaternionMsgToTF(imu.orientation, orientation);
-  tfScalar yaw, pitch, roll;
-  tf::Matrix3x3(orientation).getEulerYPR(yaw, pitch, roll);
-  tf::Quaternion rollpitch = tf::createQuaternionFromRPY(roll, pitch, 0.0);
-
-  // base_link transform (roll, pitch)
-  if (g_publish_roll_pitch) {
-    tf.child_frame_id_ = tf::resolve(g_tf_prefix, child_frame_id);
-    tf.setOrigin(tf::Vector3(0.0, 0.0, 0.0));
-    tf.setRotation(rollpitch);
-    addTransform(transforms, tf);
-  }
-
-  if (!transforms.empty()) g_transform_broadcaster->sendTransform(transforms);
-
-  // publish pose message
-  if (g_pose_publisher) {
-    geometry_msgs::PoseStamped pose_stamped;
-    pose_stamped.header.stamp = imu.header.stamp;
-    pose_stamped.header.frame_id = g_stabilized_frame_id;
-    tf::quaternionTFToMsg(rollpitch, pose_stamped.pose.orientation);
-    g_pose_publisher.publish(pose_stamped);
-  }
-}
-
-void multiCallback(topic_tools::ShapeShifter const &input) {
-  if (input.getDataType() == "nav_msgs/Odometry") {
-    nav_msgs::Odometry::ConstPtr odom = input.instantiate<nav_msgs::Odometry>();
-    odomCallback(*odom);
-    return;
-  }
-
-  if (input.getDataType() == "geometry_msgs/PoseStamped") {
-    geometry_msgs::PoseStamped::ConstPtr pose = input.instantiate<geometry_msgs::PoseStamped>();
-    poseCallback(*pose);
-    return;
-  }
-
-  if (input.getDataType() == "sensor_msgs/Imu") {
-    sensor_msgs::Imu::ConstPtr imu = input.instantiate<sensor_msgs::Imu>();
-    imuCallback(*imu);
-    return;
-  }
-
-  if (input.getDataType() == "geometry_msgs/TransformStamped") {
-    geometry_msgs::TransformStamped::ConstPtr tf = input.instantiate<geometry_msgs::TransformStamped>();
-    tfCallback(*tf);
-    return;
-  }
-
-  ROS_ERROR_THROTTLE(1.0, "message_to_tf received a %s message. Supported message types: nav_msgs/Odometry geometry_msgs/PoseStamped geometry_msgs/TransformStamped sensor_msgs/Imu", input.getDataType().c_str());
-}
-
-int main(int argc, char** argv) {
-  ros::init(argc, argv, "message_to_tf");
-
-  g_footprint_frame_id = "base_footprint";
-  g_stabilized_frame_id = "base_stabilized";
-  // g_position_frame_id = "base_position";
-  // g_child_frame_id = "base_link";
-
-  ros::NodeHandle priv_nh("~");
-  priv_nh.getParam("odometry_topic", g_odometry_topic);
-  priv_nh.getParam("pose_topic", g_pose_topic);
-  priv_nh.getParam("imu_topic", g_imu_topic);
-  priv_nh.getParam("topic", g_topic);
-  priv_nh.getParam("frame_id", g_frame_id);
-  priv_nh.getParam("footprint_frame_id", g_footprint_frame_id);
-  priv_nh.getParam("position_frame_id", g_position_frame_id);
-  priv_nh.getParam("stabilized_frame_id", g_stabilized_frame_id);
-  priv_nh.getParam("child_frame_id", g_child_frame_id);
-
-  // get topic from the commandline
-  if (argc > 1) {
-      g_topic = argv[1];
-      g_odometry_topic.clear();
-      g_pose_topic.clear();
-      g_imu_topic.clear();
-  }
-
-  g_publish_roll_pitch = true;
-  priv_nh.getParam("publish_roll_pitch", g_publish_roll_pitch);
-
-  g_tf_prefix = tf::getPrefixParam(priv_nh);
-  g_transform_broadcaster = new tf::TransformBroadcaster;
-
-  ros::NodeHandle node;
-  ros::Subscriber sub1, sub2, sub3, sub4;
-  int subscribers = 0;
-  if (!g_odometry_topic.empty()) {
-      sub1 = node.subscribe(g_odometry_topic, 10, &odomCallback);
-      subscribers++;
-  }
-  if (!g_pose_topic.empty()) {
-      sub2 = node.subscribe(g_pose_topic, 10, &poseCallback);
-      subscribers++;
-  }
-  if (!g_imu_topic.empty()) {
-      sub3 = node.subscribe(g_imu_topic, 10, &imuCallback);
-      subscribers++;
-  }
-  if (!g_topic.empty()) {
-      sub4 = node.subscribe(g_topic, 10, &multiCallback);
-      subscribers++;
-  }
-
-  if (subscribers == 0) {
-    ROS_FATAL("Usage: rosrun message_to_tf message_to_tf <topic>");
-    return 1;
-  } else if (subscribers > 1) {
-    ROS_FATAL("More than one of the parameters odometry_topic, pose_topic, imu_topic and topic are set.\n"
-              "Please specify exactly one of them or simply add the topic name to the command line.");
-    return 1;
-  }
-
-  bool publish_pose = true;
-  priv_nh.getParam("publish_pose", publish_pose);
-  if (publish_pose) {
-    std::string publish_pose_topic;
-    priv_nh.getParam("publish_pose_topic", publish_pose_topic);
-
-    if (!publish_pose_topic.empty())
-      g_pose_publisher = node.advertise<geometry_msgs::PoseStamped>(publish_pose_topic, 10);
-    else
-      g_pose_publisher = priv_nh.advertise<geometry_msgs::PoseStamped>("pose", 10);
-  }
-
-  bool publish_euler = true;
-  priv_nh.getParam("publish_euler", publish_euler);
-  if (publish_euler) {
-    std::string publish_euler_topic;
-    priv_nh.getParam("publish_euler_topic", publish_euler_topic);
-
-    if (!publish_euler_topic.empty())
-      g_euler_publisher = node.advertise<geometry_msgs::Vector3Stamped>(publish_euler_topic, 10);
-    else
-      g_euler_publisher = priv_nh.advertise<geometry_msgs::Vector3Stamped>("euler", 10);
-  }
-
-  ros::spin();
-  delete g_transform_broadcaster;
+  rclcpp::init(argc, argv);
+  rclcpp::spin(std::make_shared<MessageToTfNode>());
+  rclcpp::shutdown();
   return 0;
 }
