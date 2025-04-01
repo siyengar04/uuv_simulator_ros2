@@ -1,51 +1,64 @@
-cmake_minimum_required(VERSION 2.8.3)
+cmake_minimum_required(VERSION 3.5)
 project(uuv_assistants)
 
-find_package(catkin REQUIRED COMPONENTS
-  roscpp
+# Find ament_cmake and other dependencies
+find_package(ament_cmake REQUIRED)
+find_package(rclcpp REQUIRED)
+find_package(nav_msgs REQUIRED)
+find_package(geometry_msgs REQUIRED)
+find_package(sensor_msgs REQUIRED)
+find_package(tf2_ros REQUIRED)
+find_package(tf2_geometry_msgs REQUIRED)
+
+# Include directories if needed (for example, if you add headers in an include/ folder)
+include_directories(
+  include
+  ${rclcpp_INCLUDE_DIRS}
+)
+
+# Build the C++ executable
+add_executable(uuv_message_to_tf
+  src/message_to_tf.cpp
+)
+
+ament_target_dependencies(uuv_message_to_tf
+  rclcpp
   nav_msgs
   geometry_msgs
   sensor_msgs
-  tf
-  topic_tools)
-
-catkin_python_setup()
-
-catkin_package(
-  CATKIN_DEPENDS
-    roscpp
-    nav_msgs
-    geometry_msgs
-    sensor_msgs
-    tf
-    topic_tools
+  tf2_ros
+  tf2_geometry_msgs
 )
 
-include_directories(${catkin_INCLUDE_DIRS})
-
-add_executable(uuv_message_to_tf
-  src/message_to_tf.cc
-)
-
-target_link_libraries(uuv_message_to_tf
-  ${catkin_LIBRARIES}
-)
-
-catkin_install_python(PROGRAMS scripts/publish_footprints.py
-                               scripts/set_simulation_timer.py
-                               scripts/publish_world_models.py
-                               scripts/publish_vehicle_footprint.py
-                               scripts/unpause_simulation.py
-                               scripts/create_new_robot_model
-                               scripts/create_thruster_manager_configuration
-                      DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION})
-
-install(DIRECTORY launch
-        DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}
-        PATTERN "*~" EXCLUDE)
-
+# Install the C++ executable
 install(TARGETS uuv_message_to_tf
-  ARCHIVE DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
-  LIBRARY DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
-  RUNTIME DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
+  EXPORT export_${PROJECT_NAME}
+  RUNTIME DESTINATION lib/${PROJECT_NAME}
 )
+
+# Install Python scripts as executables
+install(PROGRAMS
+  scripts/publish_footprints.py
+  scripts/set_simulation_timer.py
+  scripts/publish_world_models.py
+  scripts/publish_vehicle_footprint.py
+  scripts/unpause_simulation.py
+  scripts/create_new_robot_model
+  scripts/create_thruster_manager_configuration
+  DESTINATION lib/${PROJECT_NAME}
+)
+
+# Install the local Python module (tf_quaternion) so that it can be imported via:
+# "from tf_quaternion.transformations import euler_from_quaternion"
+install(DIRECTORY src/tf_quaternion
+  DESTINATION lib/${PROJECT_NAME}
+  FILES_MATCHING PATTERN "*.py"
+)
+
+# Install launch files (assuming they have been converted to ROS2 Python launch files)
+install(DIRECTORY launch
+  DESTINATION share/${PROJECT_NAME}
+  FILES_MATCHING PATTERN "*.py"
+)
+
+ament_package()

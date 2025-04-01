@@ -1,37 +1,30 @@
-#!/usr/bin/env python
-# Copyright (c) 2016 The UUV Simulator Authors.
-# All rights reserved.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-from __future__ import print_function
-import rospy
+#!/usr/bin/env python3
 
+import rclpy
+from rclpy.node import Node
+
+class SetSimulationTimer(Node):
+    def __init__(self):
+        super().__init__('set_simulation_timer')
+        self.declare_parameter('timeout', 0.0)
+        self.timeout = self.get_parameter('timeout').value
+        if self.timeout <= 0:
+            self.get_logger().fatal('Termination time must be a positive floating point value')
+            rclpy.shutdown()
+        self.get_logger().info(f'Starting simulation timer - Timeout = {self.timeout} s')
+        self.timer = self.create_timer(0.01, self.timer_callback)
+
+    def timer_callback(self):
+        if self.get_clock().now().nanoseconds / 1e9 >= self.timeout:
+            self.get_logger().info('Simulation timeout - Killing simulation...')
+            rclpy.shutdown()
+
+def main(args=None):
+    rclpy.init(args=args)
+    node = SetSimulationTimer()
+    rclpy.spin(node)
+    node.destroy_node()
+    rclpy.shutdown()
 
 if __name__ == '__main__':
-    rospy.init_node('set_simulation_timer')
-
-    if rospy.is_shutdown():
-        rospy.ROSException('ROS master is not running!')
-
-    timeout = 0.0
-    if rospy.has_param('~timeout'):
-        timeout = rospy.get_param('~timeout')
-        if timeout <= 0:
-            raise rospy.ROSException('Termination time must be a positive floating point value')
-
-    print('Starting simulation timer - Timeout = {} s'.format(timeout))
-    rate = rospy.Rate(100)
-    while rospy.get_time() < timeout:
-        rate.sleep()
-
-    print('Simulation timeout - Killing simulation...')
+    main()
